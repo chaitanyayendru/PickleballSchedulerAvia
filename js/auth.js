@@ -1,5 +1,5 @@
 import { sb, currentIdentity } from './supabase-client.js';
-import { slugify, emailOf, validatePin, validateEmail, toast } from './util.js';
+import { slugify, validatePin, validateEmail, toast } from './util.js';
 
 // ============================================================
 // Group registration (PIN flow) — synthetic email + PIN as password
@@ -19,23 +19,29 @@ export async function registerGroup({ name, pin, leaderEmail, members }) {
   if (!slug) throw new Error('Group name contains no usable characters');
 
   const client = sb();
+  const authEmail = leaderEmail.trim().toLowerCase();
 
+  // The leader email is the auth identity for the group (so Supabase's email
+  // validator never sees a synthetic domain). PIN is the password. One leader
+  // email can therefore own at most one group.
   const { data: signUp, error: signErr } = await client.auth.signUp({
-    email: emailOf(slug),
+    email: authEmail,
     password: pin,
   });
   if (signErr) {
     if (/already registered/i.test(signErr.message || '')) {
-      throw new Error('A group with this name already exists. Pick another name.');
+      throw new Error('That leader email is already used by another group. Pick a different email or log in.');
     }
     throw signErr;
   }
   if (!signUp.session) {
     const { error: signInErr } = await client.auth.signInWithPassword({
-      email: emailOf(slug),
+      email: authEmail,
       password: pin,
     });
-    if (signInErr) throw new Error('Account created but auto sign-in failed: ' + signInErr.message);
+    if (signInErr) {
+      throw new Error('Account created — if Supabase email confirmation is on, check your inbox. Otherwise: ' + signInErr.message);
+    }
   }
 
   const session = (await client.auth.getSession()).data.session;
@@ -67,11 +73,15 @@ export async function registerGroup({ name, pin, leaderEmail, members }) {
 export async function loginGroup({ name, pin }) {
   if (!name) throw new Error('Group name required');
   const pinErr = validatePin(pin); if (pinErr) throw new Error(pinErr);
-  const slug = slugify(name);
-  const { error } = await sb().auth.signInWithPassword({
-    email: emailOf(slug),
-    password: pin,
-  });
+
+  // Look up the group's auth email via the SECURITY DEFINER RPC so we don't
+  // have to expose leader_email through the groups table.
+  const { data: email, error: lookupErr } = await sb()
+    .rpc('email_for_group', { p_name: name.trim() });
+  if (lookupErr) throw new Error('Could not look up group: ' + lookupErr.message);
+  if (!email) throw new Error('No group by that name. Check spelling or register a new one.');
+
+  const { error } = await sb().auth.signInWithPassword({ email, password: pin });
   if (error) {
     if (/invalid login/i.test(error.message)) throw new Error('Group name or PIN is incorrect.');
     throw error;

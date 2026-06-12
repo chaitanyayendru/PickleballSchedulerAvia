@@ -45,32 +45,27 @@ export async function currentUserGroup() {
   return { session, group };
 }
 
-// Quick heuristic: synthetic group emails live under our internal domain.
-export function isGroupEmail(email) {
-  return typeof email === 'string' && email.endsWith('@pickleball-scheduler.app');
-}
-
 // Returns one of:
 //   { kind: 'none' }
 //   { kind: 'group',      session, group }
 //   { kind: 'individual', session, profile, memberships: [{group_id, group_name}] }
+//
+// Session type is determined by what data belongs to the auth.uid():
+// a row in `groups` ⇒ group session; otherwise we fall back to profile +
+// memberships. (Email pattern can't be used because group auth now uses the
+// leader's real email, same shape as an individual.)
 export async function currentIdentity() {
   const session = await currentSession();
   if (!session) return { kind: 'none' };
 
-  if (isGroupEmail(session.user.email)) {
-    const { data: group, error } = await sb()
-      .from('groups')
-      .select('id, name, slug, leader_email')
-      .eq('auth_user_id', session.user.id)
-      .maybeSingle();
-    if (error) throw error;
-    if (group) return { kind: 'group', session, group };
-    // Synthetic email but no group row — likely a half-finished signup.
-    return { kind: 'none', session };
-  }
+  const { data: group, error: gErr } = await sb()
+    .from('groups')
+    .select('id, name, slug, leader_email')
+    .eq('auth_user_id', session.user.id)
+    .maybeSingle();
+  if (gErr) throw gErr;
+  if (group) return { kind: 'group', session, group };
 
-  // Individual user.
   const [{ data: profile }, { data: memberships }] = await Promise.all([
     sb().from('profiles')
       .select('id, display_name, email')
@@ -80,6 +75,11 @@ export async function currentIdentity() {
       .select('group_id, name, group:group_id ( id, name, slug )')
       .eq('auth_user_id', session.user.id),
   ]);
+
+  if (!profile && (!memberships || memberships.length === 0)) {
+    // Signed in but no profile/memberships — half-finished signup.
+    return { kind: 'none', session };
+  }
 
   return {
     kind: 'individual',

@@ -143,3 +143,26 @@ create or replace view public.groups_directory as
   from public.groups g;
 
 grant select on public.groups_directory to anon, authenticated;
+
+-- ------------------------------------------------------------
+-- Helper RPC: look up a group's auth email by group name.
+--
+-- We don't want to expose `groups.leader_email` to every anon client
+-- via a normal SELECT. Group login needs it, though, so we expose
+-- a narrow SECURITY DEFINER function that returns only the email
+-- string for one group name. Case-insensitive match.
+-- ------------------------------------------------------------
+create or replace function public.email_for_group(p_name text)
+returns text
+language sql
+security definer
+set search_path = public
+as $$
+  select leader_email
+    from public.groups
+   where lower(name) = lower(p_name)
+   limit 1
+$$;
+
+revoke all on function public.email_for_group(text) from public;
+grant execute on function public.email_for_group(text) to anon, authenticated;

@@ -84,14 +84,6 @@ export function groupColor(name) {
   };
 }
 
-export function emailOf(slug) {
-  // Synthetic email used as Supabase Auth identity for a group login.
-  // The PIN is the password. Slug is unique per group.
-  // We use a real ICANN TLD (.app) because Supabase rejects reserved TLDs
-  // like .local/.test/.invalid in its email validator.
-  return `${slug}@pickleball-scheduler.app`;
-}
-
 export function validatePin(pin) {
   if (typeof pin !== 'string') return 'PIN required';
   if (!/^\d{4,8}$/.test(pin)) return 'PIN must be 4–8 digits';
