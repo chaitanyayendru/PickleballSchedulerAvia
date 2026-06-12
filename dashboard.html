@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>My group · Pickleball Scheduler</title>
+  <title>Dashboard · Pickleball Scheduler</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -13,18 +13,14 @@
 <body>
   <nav class="nav">
     <div class="nav-inner">
-      <a class="brand" href="index.html">
-        <span class="brand-dot"></span>
-        Pickleball Scheduler
-      </a>
+      <a class="brand" href="index.html"><span class="brand-dot"></span> Pickleball Scheduler</a>
       <div class="nav-links"></div>
       <div class="nav-right"></div>
     </div>
   </nav>
 
   <main class="container">
-    <h1 id="page-title">My group</h1>
-
+    <h1 id="page-title">Dashboard</h1>
     <div id="content">
       <div class="card"><div class="skeleton" style="height: 160px;"></div></div>
     </div>
@@ -36,121 +32,174 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
   <script type="module">
     import { mountNav } from './js/auth.js';
-    import { sb, currentUserGroup } from './js/supabase-client.js';
+    import { sb, currentIdentity } from './js/supabase-client.js';
     import { listMyBookings, cancelBooking, extendSlot, canExtend } from './js/booking.js';
     import { listIncomingRequests, listOutgoingRequests, acceptSwap, declineSwap, cancelOwnSwap } from './js/swap.js';
+    import { listMyJoinRequests, acceptJoinRequest, declineJoinRequest, cancelJoinRequest, leaveGroup } from './js/joins.js';
     import { isoWeekStart, addDays, ymd, parseYmd, fmtHourRange, fmtDateLong, el, toast } from './js/util.js';
 
     await mountNav('dashboard');
 
     const root = document.getElementById('content');
-    const { group } = await currentUserGroup();
-    if (!group) {
-      root.innerHTML = '<div class="card"><p>You must <a href="login.html">log in</a> or <a href="register.html">register a group</a> to see this page.</p></div>';
+    const id = await currentIdentity();
+
+    if (id.kind === 'none') {
+      root.innerHTML = '<div class="card"><p>You must <a href="login.html">log in</a> or <a href="register.html">register</a> first.</p></div>';
+    } else if (id.kind === 'group') {
+      document.getElementById('page-title').textContent = id.group.name;
+      await renderGroupDashboard(id.group);
     } else {
-      document.getElementById('page-title').textContent = group.name;
-      await renderDashboard(group);
+      document.getElementById('page-title').textContent = (id.profile && id.profile.display_name) || 'Your dashboard';
+      await renderIndividualDashboard(id);
     }
 
-    async function renderDashboard(group) {
+    // ============================================================
+    // Group (captain) dashboard
+    // ============================================================
+    async function renderGroupDashboard(group) {
       root.innerHTML = '';
 
-      const bookings = await listMyBookings(group.id);
-      const incoming = await listIncomingRequests(group.id);
-      const outgoing = await listOutgoingRequests(group.id);
+      const [bookings, incomingSwap, outgoingSwap, allJoinReqs, members] = await Promise.all([
+        listMyBookings(group.id),
+        listIncomingRequests(group.id),
+        listOutgoingRequests(group.id),
+        listMyJoinRequests().catch(() => []),
+        sb().from('members').select('id, name, ordinal, auth_user_id').eq('group_id', group.id).order('ordinal'),
+      ]);
+
+      const incomingJoin = allJoinReqs.filter(r => r.status === 'pending' && r.group_id === group.id);
+      const memberRows = (members.data || []);
 
       const now = new Date();
       const upcoming = bookings.filter(b => slotEnd(b) > now);
       const past     = bookings.filter(b => slotEnd(b) <= now).reverse();
-
-      // Weekly summary
       const weekStart = isoWeekStart(now);
       const weekEnd   = addDays(weekStart, 6);
       const thisWeek = bookings.filter(b => {
         const d = parseYmd(b.slot_date);
         return d >= weekStart && d <= weekEnd;
       });
-      const summary = el('div', { class: 'card' }, [
+
+      // Weekly summary
+      root.appendChild(el('div', { class: 'card' }, [
         el('div', { class: 'card-header' }, [
           el('h2', {}, 'This week'),
           el('a', { href: 'index.html', class: 'btn btn-primary btn-sm' }, 'Book a slot →'),
         ]),
         el('p', { class: 'muted' }, `${thisWeek.length} of 16 bookings used`),
         progressBar(thisWeek.length, 16),
-      ]);
-      root.appendChild(summary);
+      ]));
 
-      // Incoming swap requests
-      const inboxCard = el('div', { class: 'card' }, [
-        el('h2', {}, `Incoming swap requests (${incoming.length})`),
+      // Incoming join requests (NEW)
+      const joinCard = el('div', { class: 'card' }, [
+        el('h2', {}, `Join requests (${incomingJoin.length})`),
       ]);
-      if (incoming.length === 0) {
-        inboxCard.appendChild(el('p', { class: 'dim' }, 'Nothing pending — other groups can request your slots from the schedule.'));
+      if (incomingJoin.length === 0) {
+        joinCard.appendChild(el('p', { class: 'dim' }, `Members: ${memberRows.length}/6. Individuals can request to join from the Groups page.`));
       } else {
         const list = el('div', { class: 'booking-list' });
-        for (const r of incoming) {
+        for (const r of incomingJoin) {
+          list.appendChild(el('div', { class: 'booking-row' }, [
+            el('div', {}, [
+              el('div', { class: 'when' }, r.profile?.display_name || r.profile?.email || '(unknown)'),
+              el('div', { class: 'meta' }, [
+                r.profile?.email || '',
+                r.message ? el('span', {}, [' · "', r.message, '"']) : null,
+              ]),
+            ]),
+            el('div', { class: 'actions' }, [
+              el('button', { class: 'btn btn-primary btn-sm', onclick: async () => {
+                try { await acceptJoinRequest(r); toast('Member added.', 'success'); renderGroupDashboard(group); }
+                catch (e) { toast(e.message || String(e), 'error'); }
+              }}, 'Accept'),
+              el('button', { class: 'btn btn-ghost btn-sm', onclick: async () => {
+                try { await declineJoinRequest(r.id); toast('Declined.', 'success'); renderGroupDashboard(group); }
+                catch (e) { toast(e.message || String(e), 'error'); }
+              }}, 'Decline'),
+            ]),
+          ]));
+        }
+        joinCard.appendChild(list);
+      }
+      root.appendChild(joinCard);
+
+      // Members list
+      const memCard = el('div', { class: 'card' }, [ el('h2', {}, `Members (${memberRows.length}/6)`) ]);
+      const memList = el('div', { class: 'booking-list' });
+      for (const m of memberRows) {
+        memList.appendChild(el('div', { class: 'booking-row' }, [
+          el('div', {}, [
+            el('div', { class: 'when' }, m.name),
+            el('div', { class: 'meta' }, m.auth_user_id ? 'Joined via individual account' : 'PIN seat'),
+          ]),
+          el('div', { class: 'actions' }, [
+            el('button', { class: 'btn btn-danger btn-sm', onclick: async () => {
+              if (!confirm(`Remove ${m.name} from the group?`)) return;
+              try { await leaveGroup(m.id); toast('Removed.', 'success'); renderGroupDashboard(group); }
+              catch (e) { toast(e.message || String(e), 'error'); }
+            }}, 'Remove'),
+          ]),
+        ]));
+      }
+      memCard.appendChild(memList);
+      root.appendChild(memCard);
+
+      // Swap inbox
+      const swapCard = el('div', { class: 'card' }, [ el('h2', {}, `Incoming swap requests (${incomingSwap.length})`) ]);
+      if (incomingSwap.length === 0) {
+        swapCard.appendChild(el('p', { class: 'dim' }, 'Nothing pending.'));
+      } else {
+        const list = el('div', { class: 'booking-list' });
+        for (const r of incomingSwap) {
           const tb = r.target_booking;
           list.appendChild(el('div', { class: 'booking-row' }, [
             el('div', {}, [
-              el('div', { class: 'when' }, [
-                fmtDateLong(parseYmd(tb.slot_date)), ' · ', fmtHourRange(tb.slot_hour),
-              ]),
+              el('div', { class: 'when' }, [fmtDateLong(parseYmd(tb.slot_date)), ' · ', fmtHourRange(tb.slot_hour)]),
               el('div', { class: 'meta' }, [
                 'From: ', el('strong', {}, r.requesting_group.name),
                 r.message ? el('span', {}, [' · "', r.message, '"']) : null,
               ]),
             ]),
             el('div', { class: 'actions' }, [
-              el('button', {
-                class: 'btn btn-primary btn-sm',
-                onclick: async () => {
-                  if (!confirm('Free this slot? The other group will need to book it themselves.')) return;
-                  try { await acceptSwap(r.id, tb.id); toast('Swap accepted — slot freed.', 'success'); renderDashboard(group); }
-                  catch (e) { toast(e.message || String(e), 'error'); }
-                },
-              }, 'Accept'),
-              el('button', {
-                class: 'btn btn-ghost btn-sm',
-                onclick: async () => {
-                  try { await declineSwap(r.id); toast('Declined.', 'success'); renderDashboard(group); }
-                  catch (e) { toast(e.message || String(e), 'error'); }
-                },
-              }, 'Decline'),
+              el('button', { class: 'btn btn-primary btn-sm', onclick: async () => {
+                if (!confirm('Free this slot? The other group will need to book it themselves.')) return;
+                try { await acceptSwap(r.id, tb.id); toast('Swap accepted.', 'success'); renderGroupDashboard(group); }
+                catch (e) { toast(e.message || String(e), 'error'); }
+              }}, 'Accept'),
+              el('button', { class: 'btn btn-ghost btn-sm', onclick: async () => {
+                try { await declineSwap(r.id); toast('Declined.', 'success'); renderGroupDashboard(group); }
+                catch (e) { toast(e.message || String(e), 'error'); }
+              }}, 'Decline'),
             ]),
           ]));
         }
-        inboxCard.appendChild(list);
+        swapCard.appendChild(list);
       }
-      root.appendChild(inboxCard);
+      root.appendChild(swapCard);
 
-      // Outgoing swap requests
+      // Outgoing swaps
       const outCard = el('div', { class: 'card' }, [
-        el('h2', {}, `Sent swap requests (${outgoing.filter(o => o.status === 'pending').length} pending)`),
+        el('h2', {}, `Sent swap requests (${outgoingSwap.filter(o => o.status === 'pending').length} pending)`),
       ]);
-      if (outgoing.length === 0) {
-        outCard.appendChild(el('p', { class: 'dim' }, 'You haven\'t requested any slots from other groups.'));
+      if (outgoingSwap.length === 0) {
+        outCard.appendChild(el('p', { class: 'dim' }, 'You haven\'t requested any slots.'));
       } else {
         const list = el('div', { class: 'booking-list' });
-        for (const r of outgoing) {
+        for (const r of outgoingSwap) {
           const tb = r.target_booking;
           list.appendChild(el('div', { class: 'booking-row' }, [
             el('div', {}, [
-              el('div', { class: 'when' }, [
-                fmtDateLong(parseYmd(tb.slot_date)), ' · ', fmtHourRange(tb.slot_hour),
-              ]),
+              el('div', { class: 'when' }, [fmtDateLong(parseYmd(tb.slot_date)), ' · ', fmtHourRange(tb.slot_hour)]),
               el('div', { class: 'meta' }, [
                 el('span', { class: 'tag' }, r.status),
                 r.message ? el('span', {}, [' · "', r.message, '"']) : null,
               ]),
             ]),
             el('div', { class: 'actions' }, [
-              r.status === 'pending' ? el('button', {
-                class: 'btn btn-ghost btn-sm',
-                onclick: async () => {
-                  try { await cancelOwnSwap(r.id); toast('Request withdrawn.', 'success'); renderDashboard(group); }
-                  catch (e) { toast(e.message || String(e), 'error'); }
-                },
-              }, 'Withdraw') : null,
+              r.status === 'pending' ? el('button', { class: 'btn btn-ghost btn-sm', onclick: async () => {
+                try { await cancelOwnSwap(r.id); toast('Withdrawn.', 'success'); renderGroupDashboard(group); }
+                catch (e) { toast(e.message || String(e), 'error'); }
+              }}, 'Withdraw') : null,
             ]),
           ]));
         }
@@ -159,9 +208,7 @@
       root.appendChild(outCard);
 
       // Upcoming bookings
-      const upcomingCard = el('div', { class: 'card' }, [
-        el('h2', {}, `Upcoming bookings (${upcoming.length})`),
-      ]);
+      const upcomingCard = el('div', { class: 'card' }, [ el('h2', {}, `Upcoming bookings (${upcoming.length})`) ]);
       if (upcoming.length === 0) {
         upcomingCard.appendChild(el('p', { class: 'dim' }, 'No upcoming bookings.'));
       } else {
@@ -169,9 +216,9 @@
         for (const b of upcoming) {
           const date = parseYmd(b.slot_date);
           const start = slotStart(b);
-          const nextSlotKey = b.slot_date + '|' + (b.slot_hour + 1);
-          const nextBooked  = bookings.some(x => (x.slot_date + '|' + x.slot_hour) === nextSlotKey);
-          const showExtend  = b.slot_hour < 23 && !nextBooked && canExtend(date, b.slot_hour, now);
+          const nextKey = b.slot_date + '|' + (b.slot_hour + 1);
+          const nextBooked = bookings.some(x => (x.slot_date + '|' + x.slot_hour) === nextKey);
+          const showExtend = b.slot_hour < 23 && !nextBooked && canExtend(date, b.slot_hour, now);
 
           list.appendChild(el('div', { class: 'booking-row' }, [
             el('div', {}, [
@@ -182,21 +229,15 @@
               el('div', { class: 'meta' }, formatRelative(start, now)),
             ]),
             el('div', { class: 'actions' }, [
-              showExtend ? el('button', {
-                class: 'btn btn-primary btn-sm',
-                onclick: async () => {
-                  try { await extendSlot(group.id, b.slot_date, b.slot_hour + 1); toast('Extension booked.', 'success'); renderDashboard(group); }
-                  catch (e) { toast(e.message || String(e), 'error'); }
-                },
-              }, 'Extend') : null,
-              el('button', {
-                class: 'btn btn-danger btn-sm',
-                onclick: async () => {
-                  if (!confirm('Cancel this booking?')) return;
-                  try { await cancelBooking(b.id); toast('Cancelled.', 'success'); renderDashboard(group); }
-                  catch (e) { toast(e.message || String(e), 'error'); }
-                },
-              }, 'Cancel'),
+              showExtend ? el('button', { class: 'btn btn-primary btn-sm', onclick: async () => {
+                try { await extendSlot(group.id, b.slot_date, b.slot_hour + 1); toast('Extension booked.', 'success'); renderGroupDashboard(group); }
+                catch (e) { toast(e.message || String(e), 'error'); }
+              }}, 'Extend') : null,
+              el('button', { class: 'btn btn-danger btn-sm', onclick: async () => {
+                if (!confirm('Cancel this booking?')) return;
+                try { await cancelBooking(b.id); toast('Cancelled.', 'success'); renderGroupDashboard(group); }
+                catch (e) { toast(e.message || String(e), 'error'); }
+              }}, 'Cancel'),
             ]),
           ]));
         }
@@ -204,10 +245,8 @@
       }
       root.appendChild(upcomingCard);
 
-      // Past (history)
-      const pastCard = el('div', { class: 'card' }, [
-        el('h2', {}, `History (${past.length})`),
-      ]);
+      // History
+      const pastCard = el('div', { class: 'card' }, [ el('h2', {}, `History (${past.length})`) ]);
       if (past.length === 0) {
         pastCard.appendChild(el('p', { class: 'dim' }, 'No past bookings yet.'));
       } else {
@@ -215,29 +254,109 @@
         for (const b of past.slice(0, 30)) {
           list.appendChild(el('div', { class: 'booking-row' }, [
             el('div', {}, [
-              el('div', { class: 'when' }, [
-                fmtDateLong(parseYmd(b.slot_date)), ' · ', fmtHourRange(b.slot_hour),
-              ]),
+              el('div', { class: 'when' }, [fmtDateLong(parseYmd(b.slot_date)), ' · ', fmtHourRange(b.slot_hour)]),
               el('div', { class: 'meta' }, b.is_extension ? 'Extension' : 'Standard booking'),
             ]),
           ]));
         }
-        if (past.length > 30) {
-          pastCard.appendChild(el('p', { class: 'dim' }, `Showing the most recent 30 of ${past.length}.`));
-        }
+        if (past.length > 30) pastCard.appendChild(el('p', { class: 'dim' }, `Showing the most recent 30 of ${past.length}.`));
         pastCard.appendChild(list);
       }
       root.appendChild(pastCard);
     }
 
+    // ============================================================
+    // Individual dashboard
+    // ============================================================
+    async function renderIndividualDashboard(id) {
+      root.innerHTML = '';
+      const myReqs = await listMyJoinRequests().catch(() => []);
+      const sent = myReqs.filter(r => r.individual_id === id.session.user.id);
+
+      // Profile
+      const p = id.profile || {};
+      root.appendChild(el('div', { class: 'card' }, [
+        el('h2', {}, 'Your account'),
+        el('p', {}, [ el('strong', {}, p.display_name || '(no name)'), ' · ', p.email || id.session.user.email ]),
+        el('p', { class: 'dim' }, 'Individual account — you can join groups and book on their behalf.'),
+      ]));
+
+      // My groups
+      const groupsCard = el('div', { class: 'card' }, [
+        el('div', { class: 'card-header' }, [
+          el('h2', {}, `Groups you're in (${id.memberships.length})`),
+          el('a', { href: 'groups.html', class: 'btn btn-ghost btn-sm' }, 'Browse all groups →'),
+        ]),
+      ]);
+      if (id.memberships.length === 0) {
+        groupsCard.appendChild(el('p', { class: 'dim' }, [
+          'You haven\'t joined any group yet. ',
+          el('a', { href: 'groups.html' }, 'Find one to join'),
+          '.',
+        ]));
+      } else {
+        const list = el('div', { class: 'booking-list' });
+        for (const m of id.memberships) {
+          list.appendChild(el('div', { class: 'booking-row' }, [
+            el('div', {}, [
+              el('div', { class: 'when' }, m.group_name),
+              el('div', { class: 'meta' }, `Seat: ${m.seat_name}`),
+            ]),
+            el('div', { class: 'actions' }, [
+              el('a', { class: 'btn btn-primary btn-sm', href: 'index.html' }, 'Book a slot'),
+              el('button', { class: 'btn btn-danger btn-sm', onclick: async () => {
+                if (!confirm(`Leave ${m.group_name}?`)) return;
+                const { data: row } = await sb().from('members').select('id').eq('group_id', m.group_id).eq('auth_user_id', id.session.user.id).maybeSingle();
+                if (!row) return;
+                try { await leaveGroup(row.id); toast('Left the group.', 'success'); location.reload(); }
+                catch (e) { toast(e.message || String(e), 'error'); }
+              }}, 'Leave'),
+            ]),
+          ]));
+        }
+        groupsCard.appendChild(list);
+      }
+      root.appendChild(groupsCard);
+
+      // Sent join requests
+      const sentCard = el('div', { class: 'card' }, [
+        el('h2', {}, `Your join requests (${sent.filter(r => r.status === 'pending').length} pending)`),
+      ]);
+      if (sent.length === 0) {
+        sentCard.appendChild(el('p', { class: 'dim' }, 'No requests sent.'));
+      } else {
+        const list = el('div', { class: 'booking-list' });
+        for (const r of sent) {
+          list.appendChild(el('div', { class: 'booking-row' }, [
+            el('div', {}, [
+              el('div', { class: 'when' }, r.group?.name || '(unknown group)'),
+              el('div', { class: 'meta' }, [
+                el('span', { class: 'tag' }, r.status),
+                r.message ? el('span', {}, [' · "', r.message, '"']) : null,
+              ]),
+            ]),
+            el('div', { class: 'actions' }, [
+              r.status === 'pending' ? el('button', { class: 'btn btn-ghost btn-sm', onclick: async () => {
+                try { await cancelJoinRequest(r.id); toast('Withdrawn.', 'success'); location.reload(); }
+                catch (e) { toast(e.message || String(e), 'error'); }
+              }}, 'Withdraw') : null,
+            ]),
+          ]));
+        }
+        sentCard.appendChild(list);
+      }
+      root.appendChild(sentCard);
+    }
+
+    // ============================================================
+    // Shared helpers
+    // ============================================================
     function slotStart(b) {
       const d = parseYmd(b.slot_date);
       d.setHours(b.slot_hour, 0, 0, 0);
       return d;
     }
-    function slotEnd(b) {
-      return new Date(slotStart(b).getTime() + 60 * 60 * 1000);
-    }
+    function slotEnd(b) { return new Date(slotStart(b).getTime() + 60 * 60 * 1000); }
     function formatRelative(d, now) {
       const diffMs = d - now;
       const abs = Math.abs(diffMs);
@@ -252,14 +371,8 @@
     }
     function progressBar(used, total) {
       const pct = Math.min(100, (used / total) * 100);
-      const wrap = el('div', { style: {
-        background: 'var(--surface-2)', borderRadius: '999px', height: '8px',
-        overflow: 'hidden', marginTop: '4px',
-      }});
-      wrap.appendChild(el('div', { style: {
-        width: pct + '%', height: '100%',
-        background: 'var(--brand-500)', transition: 'width 0.2s',
-      }}));
+      const wrap = el('div', { style: { background: 'var(--surface-2)', borderRadius: '999px', height: '8px', overflow: 'hidden', marginTop: '4px' }});
+      wrap.appendChild(el('div', { style: { width: pct + '%', height: '100%', background: 'var(--brand-500)', transition: 'width 0.2s' }}));
       return wrap;
     }
   </script>

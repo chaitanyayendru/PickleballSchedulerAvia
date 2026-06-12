@@ -1,7 +1,7 @@
-import { sb, currentUserGroup } from './supabase-client.js';
+import { sb, currentIdentity } from './supabase-client.js';
 import {
   isoWeekStart, addDays, ymd, parseYmd, isSameDay,
-  fmtHour12, fmtHourRange, fmtDateLong, DOW_SHORT, groupColor, el, toast, escapeHtml,
+  fmtHour12, fmtHourRange, fmtDateLong, DOW_SHORT, groupColor, el, toast,
 } from './util.js';
 import { bookSlot, cancelBooking, extendSlot, canExtend } from './booking.js';
 import { createSwapRequest } from './swap.js';
@@ -13,31 +13,41 @@ export class WeekScheduler {
   constructor(container, { onChange } = {}) {
     this.container = container;
     this.weekStart = isoWeekStart(new Date());
-    this.bookings = [];          // bookings_view rows for current week
-    this.swapRequests = [];      // swap_requests for current week's bookings
-    this.group = null;
+    this.bookings = [];
+    this.swapRequests = [];
+    this.identity = { kind: 'none' };
+    this.availableGroups = []; // [{ id, name, slug, role: 'captain' | 'member' }]
     this.now = new Date();
     this.onChange = onChange || (() => {});
     this._modal = null;
   }
 
   async init() {
-    const { group } = await currentUserGroup();
-    this.group = group;
+    this.identity = await currentIdentity();
+    this.availableGroups = this._deriveAvailableGroups(this.identity);
     await this.refresh();
-    // Re-render the "now" indicator every minute.
-    setInterval(() => {
-      this.now = new Date();
-      this.render();
-    }, 60_000);
+    setInterval(() => { this.now = new Date(); this.render(); }, 60_000);
+  }
+
+  _deriveAvailableGroups(id) {
+    if (id.kind === 'group') {
+      return [{ id: id.group.id, name: id.group.name, slug: id.group.slug, role: 'captain' }];
+    }
+    if (id.kind === 'individual') {
+      return (id.memberships || []).map(m => ({
+        id: m.group_id, name: m.group_name, slug: m.group_slug, role: 'member',
+      }));
+    }
+    return [];
+  }
+
+  _isOwnedGroupId(groupId) {
+    return this.availableGroups.some(g => g.id === groupId);
   }
 
   weekEnd() { return addDays(this.weekStart, 6); }
 
-  setWeek(d) {
-    this.weekStart = isoWeekStart(d);
-    return this.refresh();
-  }
+  setWeek(d) { this.weekStart = isoWeekStart(d); return this.refresh(); }
 
   async refresh() {
     const start = ymd(this.weekStart);
@@ -52,7 +62,6 @@ export class WeekScheduler {
     if (error) { toast('Failed to load schedule: ' + error.message, 'error'); return; }
     this.bookings = data || [];
 
-    // Pull pending swap requests targeting any of these bookings.
     if (this.bookings.length) {
       const ids = this.bookings.map(b => b.id);
       const { data: swaps } = await sb()
@@ -73,7 +82,6 @@ export class WeekScheduler {
     const c = this.container;
     c.innerHTML = '';
 
-    // Toolbar
     const toolbar = el('div', { class: 'week-toolbar' }, [
       el('div', { class: 'week-label' }, this._weekLabel()),
       el('div', { class: 'week-nav' }, [
@@ -84,23 +92,35 @@ export class WeekScheduler {
     ]);
     c.appendChild(toolbar);
 
-    // Legend with this group's color (if logged in)
-    if (this.group) {
-      const color = groupColor(this.group.name);
-      const legend = el('div', { class: 'legend' }, [
-        el('span', {}, [
-          el('span', { class: 'legend-swatch', style: { background: color.bg } }),
-          'Your group: ', el('strong', {}, this.group.name),
-        ]),
-        el('span', { class: 'dim' }, 'Click any free slot to book. Past slots are locked.'),
-      ]);
-      c.appendChild(legend);
+    // Legend
+    const legendItems = [];
+    if (this.availableGroups.length === 0) {
+      if (this.identity.kind === 'individual') {
+        legendItems.push(el('span', { class: 'dim' }, [
+          'You haven\'t joined any group yet. ',
+          el('a', { href: 'groups.html' }, 'Find a group to join'),
+          '.',
+        ]));
+      } else {
+        legendItems.push(el('span', { class: 'dim' }, [
+          el('a', { href: 'login.html' }, 'Log in'),
+          ' or ',
+          el('a', { href: 'register.html' }, 'register a group'),
+          ' to book a slot.',
+        ]));
+      }
     } else {
-      const legend = el('div', { class: 'legend' }, [
-        el('span', { class: 'dim' }, 'Log in or register a group to book a slot.'),
-      ]);
-      c.appendChild(legend);
+      for (const g of this.availableGroups) {
+        const color = groupColor(g.name);
+        legendItems.push(el('span', {}, [
+          el('span', { class: 'legend-swatch', style: { background: color.bg } }),
+          g.name,
+          el('span', { class: 'dim' }, ` · ${g.role}`),
+        ]));
+      }
+      legendItems.push(el('span', { class: 'dim' }, 'Click any free slot to book.'));
     }
+    c.appendChild(el('div', { class: 'legend' }, legendItems));
 
     // Grid
     const wrap = el('div', { class: 'grid-wrap' });
@@ -108,8 +128,7 @@ export class WeekScheduler {
     wrap.appendChild(grid);
     c.appendChild(wrap);
 
-    // Header row
-    grid.appendChild(el('div', { class: 'col-header' }, '')); // corner
+    grid.appendChild(el('div', { class: 'col-header' }, ''));
     for (let d = 0; d < DAYS; d++) {
       const date = addDays(this.weekStart, d);
       const isToday = isSameDay(date, this.now);
@@ -119,7 +138,6 @@ export class WeekScheduler {
       ]));
     }
 
-    // Index bookings by (date, hour) for fast lookup.
     const bookingByKey = new Map();
     for (const b of this.bookings) bookingByKey.set(`${b.slot_date}|${b.slot_hour}`, b);
 
@@ -136,21 +154,16 @@ export class WeekScheduler {
         const classes = ['cell'];
         if (isPast) classes.push('past');
         if (isNow)  classes.push('now');
-        if (booking && this.group && booking.group_id === this.group.id) classes.push('cell-mine');
+        if (booking && this._isOwnedGroupId(booking.group_id)) classes.push('cell-mine');
 
         const children = [];
         if (booking) {
           const color = groupColor(booking.group_name);
-          const tag = el('span', {
+          children.push(el('span', {
             class: 'cell-tag' + (booking.is_extension ? ' is-extension' : ''),
-            style: {
-              background: color.bg,
-              color: color.text,
-            },
+            style: { background: color.bg, color: color.text },
             title: `${booking.group_name}${booking.is_extension ? ' (extension)' : ''}`,
-          }, booking.group_name);
-          // Dark-mode color override via CSS variable trick — we use a data attribute so prefers-color-scheme rules can pick it up.
-          children.push(tag);
+          }, booking.group_name));
         }
 
         const cell = el('div', { class: classes.join(' ') }, children);
@@ -169,15 +182,17 @@ export class WeekScheduler {
     const b = this.weekEnd();
     const sameMonth = a.getMonth() === b.getMonth();
     const aStr = a.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    const bStr = b.toLocaleDateString(undefined, sameMonth ? { day: 'numeric', year: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
+    const bStr = b.toLocaleDateString(undefined, sameMonth
+      ? { day: 'numeric', year: 'numeric' }
+      : { month: 'short', day: 'numeric', year: 'numeric' });
     return `${aStr} – ${bStr}`;
   }
 
   async _onCellClick(cell, booking, dateStr, hour) {
-    if (!this.group) {
+    if (this.identity.kind === 'none') {
       this._openModal({
         title: 'Log in to book',
-        body: 'You need to be logged in as a group to book or manage slots.',
+        body: 'You need to log in to book or manage slots.',
         buttons: [
           { label: 'Cancel', kind: 'ghost', onClick: () => this._closeModal() },
           { label: 'Go to login', kind: 'primary', onClick: () => location.href = 'login.html' },
@@ -186,37 +201,26 @@ export class WeekScheduler {
       return;
     }
 
-    if (!booking) {
-      // Free slot — offer to book.
+    if (this.availableGroups.length === 0) {
+      // Individual without any group membership
       this._openModal({
-        title: `Book ${fmtHourRange(hour)}`,
-        body: el('div', {}, [
-          el('p', {}, fmtDateLong(parseYmd(dateStr))),
-          el('p', { class: 'dim' }, [
-            `Rules: same hour ≤ 2× this week. ≤ 16 total this week. `,
-            this._sameHourCountNote(hour),
-          ]),
-        ]),
+        title: 'Join a group first',
+        body: 'You\'re signed in but you\'re not in any group yet. Find one to join and request membership.',
         buttons: [
-          { label: 'Cancel', kind: 'ghost', onClick: () => this._closeModal() },
-          { label: 'Book this slot', kind: 'primary', onClick: async () => {
-            try {
-              await bookSlot(this.group.id, dateStr, hour);
-              toast('Slot booked.', 'success');
-              this._closeModal();
-              await this.refresh();
-            } catch (e) {
-              toast(e.message || String(e), 'error');
-            }
-          }},
+          { label: 'Close', kind: 'ghost', onClick: () => this._closeModal() },
+          { label: 'Browse groups', kind: 'primary', onClick: () => location.href = 'groups.html' },
         ],
       });
       return;
     }
 
-    // Existing booking — show details + actions.
-    const mine = booking.group_id === this.group.id;
-    const isExtensionCandidate = !mine; // can't extend someone else's
+    if (!booking) {
+      this._openBookModal(dateStr, hour);
+      return;
+    }
+
+    // Existing booking
+    const mine = this._isOwnedGroupId(booking.group_id);
     const actions = [];
 
     if (mine) {
@@ -230,12 +234,11 @@ export class WeekScheduler {
         } catch (e) { toast(e.message || String(e), 'error'); }
       }});
 
-      // Offer extension if next-hour cell is free and current cell is past half-time.
-      const next = bookingByKey(this.bookings, dateStr, hour + 1);
+      const next = lookupBooking(this.bookings, dateStr, hour + 1);
       if (hour < 23 && !next && canExtend(parseYmd(dateStr), hour, this.now)) {
         actions.push({ label: `Extend to ${fmtHour12((hour+1)%24)}`, kind: 'primary', onClick: async () => {
           try {
-            await extendSlot(this.group.id, dateStr, hour + 1);
+            await extendSlot(booking.group_id, dateStr, hour + 1);
             toast('Extension booked.', 'success');
             this._closeModal();
             await this.refresh();
@@ -243,7 +246,6 @@ export class WeekScheduler {
         }});
       }
     } else {
-      // Request a swap (i.e. ask them to give up the slot).
       actions.push({ label: 'Request this slot', kind: 'primary', onClick: () => this._openSwapModal(booking) });
     }
     actions.push({ label: 'Close', kind: 'ghost', onClick: () => this._closeModal() });
@@ -253,46 +255,118 @@ export class WeekScheduler {
       title: booking.group_name + (booking.is_extension ? ' (extension)' : ''),
       body: el('div', {}, [
         el('p', {}, [fmtDateLong(parseYmd(dateStr)), ' · ', fmtHourRange(hour)]),
-        mine ? el('p', { class: 'dim' }, 'This is your group\'s booking.') : null,
+        mine ? el('p', { class: 'dim' }, 'This booking belongs to a group you\'re in.') : null,
         pending.length ? el('p', { class: 'tag' }, `${pending.length} pending swap request${pending.length>1?'s':''}`) : null,
       ]),
       buttons: actions,
     });
   }
 
-  _sameHourCountNote(hour) {
-    if (!this.group) return '';
+  _openBookModal(dateStr, hour) {
+    // Pick the group to book for. If only one available, no chooser.
+    let selectedGroupId = this.availableGroups[0].id;
+
+    const bodyChildren = [
+      el('p', {}, fmtDateLong(parseYmd(dateStr))),
+    ];
+
+    if (this.availableGroups.length > 1) {
+      const select = document.createElement('select');
+      for (const g of this.availableGroups) {
+        const opt = document.createElement('option');
+        opt.value = g.id;
+        opt.textContent = `${g.name} (${g.role})`;
+        select.appendChild(opt);
+      }
+      select.addEventListener('change', () => { selectedGroupId = select.value; });
+      bodyChildren.push(el('div', { class: 'field' }, [
+        el('label', {}, 'Book for which group?'),
+        select,
+      ]));
+    } else {
+      bodyChildren.push(el('p', { class: 'dim' }, [
+        'Booking as ', el('strong', {}, this.availableGroups[0].name), '.',
+      ]));
+    }
+
+    bodyChildren.push(el('p', { class: 'dim' }, [
+      `Rules: same hour ≤ 2× this week. ≤ 16 total this week. `,
+      el('span', { id: '_same-hour-note' }, this._sameHourCountNote(hour, selectedGroupId)),
+    ]));
+
+    this._openModal({
+      title: `Book ${fmtHourRange(hour)}`,
+      body: el('div', {}, bodyChildren),
+      buttons: [
+        { label: 'Cancel', kind: 'ghost', onClick: () => this._closeModal() },
+        { label: 'Book this slot', kind: 'primary', onClick: async () => {
+          try {
+            await bookSlot(selectedGroupId, dateStr, hour);
+            toast('Slot booked.', 'success');
+            this._closeModal();
+            await this.refresh();
+          } catch (e) {
+            toast(e.message || String(e), 'error');
+          }
+        }},
+      ],
+    });
+  }
+
+  _sameHourCountNote(hour, groupId) {
+    if (!groupId) return '';
     const start = ymd(this.weekStart), end = ymd(this.weekEnd());
     const n = this.bookings.filter(b =>
-      b.group_id === this.group.id &&
+      b.group_id === groupId &&
       b.slot_hour === hour &&
       b.slot_date >= start && b.slot_date <= end &&
       !b.is_extension
     ).length;
-    return `You have ${n} booking${n === 1 ? '' : 's'} at this hour this week.`;
+    return `${n} booking${n === 1 ? '' : 's'} at this hour this week.`;
   }
 
   _openSwapModal(booking) {
     let message = '';
+    // For swap requests, the requesting group must be one I can act for.
+    let requestingGroupId = this.availableGroups[0].id;
+
+    const bodyChildren = [
+      el('p', { class: 'dim' }, `Sends a request to ${booking.group_name}. They'll accept or decline from their dashboard.`),
+    ];
+
+    if (this.availableGroups.length > 1) {
+      const select = document.createElement('select');
+      for (const g of this.availableGroups) {
+        const opt = document.createElement('option');
+        opt.value = g.id;
+        opt.textContent = `${g.name} (${g.role})`;
+        select.appendChild(opt);
+      }
+      select.addEventListener('change', () => { requestingGroupId = select.value; });
+      bodyChildren.push(el('div', { class: 'field' }, [
+        el('label', {}, 'Request on behalf of'),
+        select,
+      ]));
+    }
+
+    bodyChildren.push(el('div', { class: 'field' }, [
+      el('label', {}, 'Optional message'),
+      (() => {
+        const ta = el('textarea', { rows: 3, placeholder: 'e.g. Hi! Mind if we take this slot? Happy to swap.' });
+        ta.addEventListener('input', () => { message = ta.value; });
+        return ta;
+      })(),
+    ]));
+
     this._openModal({
       title: `Request ${booking.group_name}'s slot`,
-      body: el('div', {}, [
-        el('p', { class: 'dim' }, `We'll send a swap request to ${booking.group_name}. They'll see it in their dashboard.`),
-        el('div', { class: 'field' }, [
-          el('label', {}, 'Optional message'),
-          (() => {
-            const ta = el('textarea', { rows: 3, placeholder: 'e.g. Hi! Mind if our group takes this slot? We can play another time.' });
-            ta.addEventListener('input', () => { message = ta.value; });
-            return ta;
-          })(),
-        ]),
-      ]),
+      body: el('div', {}, bodyChildren),
       buttons: [
         { label: 'Cancel', kind: 'ghost', onClick: () => this._closeModal() },
         { label: 'Send request', kind: 'primary', onClick: async () => {
           try {
             await createSwapRequest({
-              requesting_group_id: this.group.id,
+              requesting_group_id: requestingGroupId,
               target_booking_id: booking.id,
               message,
             });
@@ -322,14 +396,10 @@ export class WeekScheduler {
   }
 
   _closeModal() {
-    if (this._modal) {
-      this._modal.remove();
-      this._modal = null;
-    }
+    if (this._modal) { this._modal.remove(); this._modal = null; }
   }
 }
 
-// Helper: look up a booking in a list by date+hour.
-function bookingByKey(list, dateStr, hour) {
+function lookupBooking(list, dateStr, hour) {
   return list.find(b => b.slot_date === dateStr && b.slot_hour === hour) || null;
 }

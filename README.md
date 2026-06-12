@@ -5,7 +5,9 @@ A free, static, community-pickleball-court booking site. Hosts on GitHub Pages, 
 ## Features
 
 - **24-hour weekly schedule** with color-coded bookings per group
-- **Group registration** — 6 members per group, name + PIN login
+- **Group registration** — 3–6 members per group, name + PIN login
+- **Individual accounts** — sign up with email + password, browse groups, request to join, captain approves
+- **Multi-group membership** — once accepted, you can book on behalf of any group you're in
 - **Booking rules enforced in the database**:
   - Same hour ≤ 2× per week per group
   - ≤ 16 bookings per week per group
@@ -25,7 +27,7 @@ GitHub Pages is static-only (no backend). To get *shared* persistence across all
 
 1. Sign up at <https://supabase.com> (free, no card).
 2. Create a new project. Pick a region close to your community. Save the database password somewhere safe.
-3. In your project, go to **SQL Editor** → **New query**. Paste the contents of [`supabase/schema.sql`](supabase/schema.sql) and click **Run**. You should see "Success. No rows returned".
+3. In your project, go to **SQL Editor** → **New query**. Paste the contents of [`supabase/schema.sql`](supabase/schema.sql) and click **Run**. You should see "Success. No rows returned". Then run [`supabase/schema_v2.sql`](supabase/schema_v2.sql) the same way — this adds individual accounts, group browsing, and join requests on top of v1.
 4. Go to **Authentication → Providers → Email** and **turn off "Confirm email"** (the app uses synthetic group emails that no one will receive). Save.
 5. Go to **Project Settings → API** and copy:
    - The **Project URL** (looks like `https://abcdefg.supabase.co`)

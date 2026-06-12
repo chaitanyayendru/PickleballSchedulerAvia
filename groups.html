@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Groups · Pickleball Scheduler</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%239fdc1a'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <nav class="nav">
+    <div class="nav-inner">
+      <a class="brand" href="index.html"><span class="brand-dot"></span> Pickleball Scheduler</a>
+      <div class="nav-links"></div>
+      <div class="nav-right"></div>
+    </div>
+  </nav>
+
+  <main class="container">
+    <div class="card-header">
+      <div>
+        <h1>All groups</h1>
+        <p class="muted">Find a group to join. Captains review requests in their dashboard.</p>
+      </div>
+    </div>
+    <div id="groups"></div>
+  </main>
+
+  <footer class="footer">Pickleball Scheduler</footer>
+
+  <script src="js/config.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+  <script type="module">
+    import { mountNav } from './js/auth.js';
+    import { currentIdentity } from './js/supabase-client.js';
+    import { listGroupsDirectory, requestJoin, listMyJoinRequests } from './js/joins.js';
+    import { el, toast, groupColor } from './js/util.js';
+
+    await mountNav('groups');
+    const root = document.getElementById('groups');
+
+    try {
+      const [id, groups, myReqs] = await Promise.all([
+        currentIdentity(),
+        listGroupsDirectory(),
+        currentSessionSafe(),
+      ]);
+      render(id, groups, myReqs);
+    } catch (e) {
+      root.innerHTML = '<div class="banner banner-error">Could not load groups: ' + (e.message || e) + '</div>';
+    }
+
+    async function currentSessionSafe() {
+      try { return await listMyJoinRequests(); }
+      catch { return []; }
+    }
+
+    function render(id, groups, myReqs) {
+      root.innerHTML = '';
+
+      if (id.kind === 'group') {
+        root.appendChild(el('div', { class: 'banner banner-info' }, [
+          'You are logged in as the captain of ', el('strong', {}, id.group.name),
+          '. Switch to an individual account to request joining a group.',
+        ]));
+      } else if (id.kind === 'none') {
+        root.appendChild(el('div', { class: 'banner banner-info' }, [
+          el('a', { href: 'signup.html' }, 'Sign up'),
+          ' or ',
+          el('a', { href: 'login.html' }, 'log in'),
+          ' as an individual to request joining a group.',
+        ]));
+      }
+
+      if (!groups.length) {
+        root.appendChild(el('div', { class: 'card' }, [
+          el('p', { class: 'muted' }, 'No groups yet. ', el('a', { href: 'register.html' }, 'Register the first one'), '.'),
+        ]));
+        return;
+      }
+
+      const pendingByGroup = new Map();
+      for (const r of myReqs) {
+        if (r.status === 'pending') pendingByGroup.set(r.group_id, r);
+      }
+      const memberOf = new Set(
+        (id.kind === 'individual' ? (id.memberships || []) : []).map(m => m.group_id)
+      );
+
+      const grid = el('div', { class: 'stack' });
+      for (const g of groups) {
+        const color = groupColor(g.name);
+        const isMember = memberOf.has(g.id);
+        const isFull   = g.member_count >= 6;
+        const isPending= pendingByGroup.has(g.id);
+
+        const actions = [];
+        if (id.kind === 'individual') {
+          if (isMember) {
+            actions.push(el('span', { class: 'tag' }, 'You\'re a member'));
+          } else if (isPending) {
+            actions.push(el('span', { class: 'tag' }, 'Request pending'));
+          } else if (isFull) {
+            actions.push(el('span', { class: 'tag' }, 'Full (6/6)'));
+          } else {
+            actions.push(el('button', {
+              class: 'btn btn-primary btn-sm',
+              onclick: () => openJoinModal(g),
+            }, 'Request to join'));
+          }
+        }
+
+        grid.appendChild(el('div', { class: 'card', style: { borderLeft: `4px solid ${color.bg}` } }, [
+          el('div', { class: 'card-header' }, [
+            el('div', {}, [
+              el('h2', { style: { margin: 0 } }, g.name),
+              el('div', { class: 'dim' }, `${g.member_count} of 6 members`),
+            ]),
+            el('div', { class: 'row' }, actions),
+          ]),
+        ]));
+      }
+      root.appendChild(grid);
+    }
+
+    function openJoinModal(group) {
+      let message = '';
+      const backdrop = el('div', { class: 'modal-backdrop' });
+      backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
+      const modal = el('div', { class: 'modal' }, [
+        el('h2', {}, `Request to join ${group.name}`),
+        el('p', { class: 'dim' }, 'The captain will see this in their dashboard and accept or decline.'),
+        el('div', { class: 'field' }, [
+          el('label', {}, 'Optional message'),
+          (() => {
+            const ta = el('textarea', { rows: 3, placeholder: 'Hi! I\'d love to join your group.' });
+            ta.addEventListener('input', () => { message = ta.value; });
+            return ta;
+          })(),
+        ]),
+        el('div', { class: 'actions' }, [
+          el('button', { class: 'btn btn-ghost', onclick: () => backdrop.remove() }, 'Cancel'),
+          el('button', {
+            class: 'btn btn-primary',
+            onclick: async () => {
+              try {
+                await requestJoin({ group_id: group.id, message });
+                toast('Request sent.', 'success');
+                backdrop.remove();
+                location.reload();
+              } catch (e) { toast(e.message || String(e), 'error'); }
+            },
+          }, 'Send request'),
+        ]),
+      ]);
+      backdrop.appendChild(modal);
+      document.body.appendChild(backdrop);
+    }
+  </script>
+</body>
+</html>
