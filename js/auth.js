@@ -7,8 +7,10 @@ export async function registerGroup({ name, pin, leaderEmail, members }) {
   if (!name || name.trim().length < 2) errs.push('Group name must be at least 2 characters');
   const pinErr = validatePin(pin); if (pinErr) errs.push(pinErr);
   const emailErr = validateEmail(leaderEmail); if (emailErr) errs.push(emailErr);
-  if (!Array.isArray(members) || members.length !== 6) errs.push('Provide all 6 member names');
-  else if (members.some(m => !m || !m.trim())) errs.push('Member names cannot be blank');
+  // Members: 3 minimum, 6 maximum. Trim and drop blanks.
+  const cleanMembers = Array.isArray(members) ? members.map(m => (m || '').trim()).filter(Boolean) : [];
+  if (cleanMembers.length < 3) errs.push('At least 3 member names required');
+  if (cleanMembers.length > 6) errs.push('No more than 6 member names allowed');
   if (errs.length) throw new Error(errs.join('. '));
 
   const slug = slugify(name);
@@ -56,9 +58,9 @@ export async function registerGroup({ name, pin, leaderEmail, members }) {
   }
 
   // 3. Insert members.
-  const memberRows = members.map((n, i) => ({
+  const memberRows = cleanMembers.map((n, i) => ({
     group_id: group.id,
-    name: n.trim(),
+    name: n,
     ordinal: i + 1,
   }));
   const { error: mErr } = await client.from('members').insert(memberRows);

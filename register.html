@@ -53,8 +53,8 @@
         </div>
 
         <div class="field">
-          <label>Six member names</label>
-          <div class="hint" style="margin-bottom: 6px;">All six required.</div>
+          <label>Member names</label>
+          <div class="hint" style="margin-bottom: 6px;">3 to 6 members. First 3 required, the rest optional.</div>
           <div class="grid-2" id="members"></div>
         </div>
 
@@ -80,10 +80,12 @@
 
     const membersBox = document.getElementById('members');
     for (let i = 1; i <= 6; i++) {
+      const required = i <= 3 ? 'required' : '';
+      const placeholder = i <= 3 ? `Member ${i}` : `Member ${i} (optional)`;
       const field = document.createElement('div');
       field.className = 'field';
       field.innerHTML = `
-        <input type="text" name="member${i}" maxlength="40" required placeholder="Member ${i}" />
+        <input type="text" name="member${i}" maxlength="40" ${required} placeholder="${placeholder}" />
       `;
       membersBox.appendChild(field);
     }
