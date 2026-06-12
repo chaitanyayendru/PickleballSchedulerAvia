@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>My group · Pickleball Scheduler</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%239fdc1a'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <nav class="nav">
+    <div class="nav-inner">
+      <a class="brand" href="index.html">
+        <span class="brand-dot"></span>
+        Pickleball Scheduler
+      </a>
+      <div class="nav-links"></div>
+      <div class="nav-right"></div>
+    </div>
+  </nav>
+
+  <main class="container">
+    <h1 id="page-title">My group</h1>
+
+    <div id="content">
+      <div class="card"><div class="skeleton" style="height: 160px;"></div></div>
+    </div>
+  </main>
+
+  <footer class="footer">Pickleball Scheduler</footer>
+
+  <script src="js/config.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+  <script type="module">
+    import { mountNav } from './js/auth.js';
+    import { sb, currentUserGroup } from './js/supabase-client.js';
+    import { listMyBookings, cancelBooking, extendSlot, canExtend } from './js/booking.js';
+    import { listIncomingRequests, listOutgoingRequests, acceptSwap, declineSwap, cancelOwnSwap } from './js/swap.js';
+    import { isoWeekStart, addDays, ymd, parseYmd, fmtHourRange, fmtDateLong, el, toast } from './js/util.js';
+
+    await mountNav('dashboard');
+
+    const root = document.getElementById('content');
+    const { group } = await currentUserGroup();
+    if (!group) {
+      root.innerHTML = '<div class="card"><p>You must <a href="login.html">log in</a> or <a href="register.html">register a group</a> to see this page.</p></div>';
+    } else {
+      document.getElementById('page-title').textContent = group.name;
+      await renderDashboard(group);
+    }
+
+    async function renderDashboard(group) {
+      root.innerHTML = '';
+
+      const bookings = await listMyBookings(group.id);
+      const incoming = await listIncomingRequests(group.id);
+      const outgoing = await listOutgoingRequests(group.id);
+
+      const now = new Date();
+      const upcoming = bookings.filter(b => slotEnd(b) > now);
+      const past     = bookings.filter(b => slotEnd(b) <= now).reverse();
+
+      // Weekly summary
+      const weekStart = isoWeekStart(now);
+      const weekEnd   = addDays(weekStart, 6);
+      const thisWeek = bookings.filter(b => {
+        const d = parseYmd(b.slot_date);
+        return d >= weekStart && d <= weekEnd;
+      });
+      const summary = el('div', { class: 'card' }, [
+        el('div', { class: 'card-header' }, [
+          el('h2', {}, 'This week'),
+          el('a', { href: 'index.html', class: 'btn btn-primary btn-sm' }, 'Book a slot →'),
+        ]),
+        el('p', { class: 'muted' }, `${thisWeek.length} of 16 bookings used`),
+        progressBar(thisWeek.length, 16),
+      ]);
+      root.appendChild(summary);
+
+      // Incoming swap requests
+      const inboxCard = el('div', { class: 'card' }, [
+        el('h2', {}, `Incoming swap requests (${incoming.length})`),
+      ]);
+      if (incoming.length === 0) {
+        inboxCard.appendChild(el('p', { class: 'dim' }, 'Nothing pending — other groups can request your slots from the schedule.'));
+      } else {
+        const list = el('div', { class: 'booking-list' });
+        for (const r of incoming) {
+          const tb = r.target_booking;
+          list.appendChild(el('div', { class: 'booking-row' }, [
+            el('div', {}, [
+              el('div', { class: 'when' }, [
+                fmtDateLong(parseYmd(tb.slot_date)), ' · ', fmtHourRange(tb.slot_hour),
+              ]),
+              el('div', { class: 'meta' }, [
+                'From: ', el('strong', {}, r.requesting_group.name),
+                r.message ? el('span', {}, [' · "', r.message, '"']) : null,
+              ]),
+            ]),
+            el('div', { class: 'actions' }, [
+              el('button', {
+                class: 'btn btn-primary btn-sm',
+                onclick: async () => {
+                  if (!confirm('Free this slot? The other group will need to book it themselves.')) return;
+                  try { await acceptSwap(r.id, tb.id); toast('Swap accepted — slot freed.', 'success'); renderDashboard(group); }
+                  catch (e) { toast(e.message || String(e), 'error'); }
+                },
+              }, 'Accept'),
+              el('button', {
+                class: 'btn btn-ghost btn-sm',
+                onclick: async () => {
+                  try { await declineSwap(r.id); toast('Declined.', 'success'); renderDashboard(group); }
+                  catch (e) { toast(e.message || String(e), 'error'); }
+                },
+              }, 'Decline'),
+            ]),
+          ]));
+        }
+        inboxCard.appendChild(list);
+      }
+      root.appendChild(inboxCard);
+
+      // Outgoing swap requests
+      const outCard = el('div', { class: 'card' }, [
+        el('h2', {}, `Sent swap requests (${outgoing.filter(o => o.status === 'pending').length} pending)`),
+      ]);
+      if (outgoing.length === 0) {
+        outCard.appendChild(el('p', { class: 'dim' }, 'You haven\'t requested any slots from other groups.'));
+      } else {
+        const list = el('div', { class: 'booking-list' });
+        for (const r of outgoing) {
+          const tb = r.target_booking;
+          list.appendChild(el('div', { class: 'booking-row' }, [
+            el('div', {}, [
+              el('div', { class: 'when' }, [
+                fmtDateLong(parseYmd(tb.slot_date)), ' · ', fmtHourRange(tb.slot_hour),
+              ]),
+              el('div', { class: 'meta' }, [
+                el('span', { class: 'tag' }, r.status),
+                r.message ? el('span', {}, [' · "', r.message, '"']) : null,
+              ]),
+            ]),
+            el('div', { class: 'actions' }, [
+              r.status === 'pending' ? el('button', {
+                class: 'btn btn-ghost btn-sm',
+                onclick: async () => {
+                  try { await cancelOwnSwap(r.id); toast('Request withdrawn.', 'success'); renderDashboard(group); }
+                  catch (e) { toast(e.message || String(e), 'error'); }
+                },
+              }, 'Withdraw') : null,
+            ]),
+          ]));
+        }
+        outCard.appendChild(list);
+      }
+      root.appendChild(outCard);
+
+      // Upcoming bookings
+      const upcomingCard = el('div', { class: 'card' }, [
+        el('h2', {}, `Upcoming bookings (${upcoming.length})`),
+      ]);
+      if (upcoming.length === 0) {
+        upcomingCard.appendChild(el('p', { class: 'dim' }, 'No upcoming bookings.'));
+      } else {
+        const list = el('div', { class: 'booking-list' });
+        for (const b of upcoming) {
+          const date = parseYmd(b.slot_date);
+          const start = slotStart(b);
+          const nextSlotKey = b.slot_date + '|' + (b.slot_hour + 1);
+          const nextBooked  = bookings.some(x => (x.slot_date + '|' + x.slot_hour) === nextSlotKey);
+          const showExtend  = b.slot_hour < 23 && !nextBooked && canExtend(date, b.slot_hour, now);
+
+          list.appendChild(el('div', { class: 'booking-row' }, [
+            el('div', {}, [
+              el('div', { class: 'when' }, [
+                fmtDateLong(date), ' · ', fmtHourRange(b.slot_hour),
+                b.is_extension ? el('span', { class: 'tag', style: { marginLeft: '8px' } }, 'extension') : null,
+              ]),
+              el('div', { class: 'meta' }, formatRelative(start, now)),
+            ]),
+            el('div', { class: 'actions' }, [
+              showExtend ? el('button', {
+                class: 'btn btn-primary btn-sm',
+                onclick: async () => {
+                  try { await extendSlot(group.id, b.slot_date, b.slot_hour + 1); toast('Extension booked.', 'success'); renderDashboard(group); }
+                  catch (e) { toast(e.message || String(e), 'error'); }
+                },
+              }, 'Extend') : null,
+              el('button', {
+                class: 'btn btn-danger btn-sm',
+                onclick: async () => {
+                  if (!confirm('Cancel this booking?')) return;
+                  try { await cancelBooking(b.id); toast('Cancelled.', 'success'); renderDashboard(group); }
+                  catch (e) { toast(e.message || String(e), 'error'); }
+                },
+              }, 'Cancel'),
+            ]),
+          ]));
+        }
+        upcomingCard.appendChild(list);
+      }
+      root.appendChild(upcomingCard);
+
+      // Past (history)
+      const pastCard = el('div', { class: 'card' }, [
+        el('h2', {}, `History (${past.length})`),
+      ]);
+      if (past.length === 0) {
+        pastCard.appendChild(el('p', { class: 'dim' }, 'No past bookings yet.'));
+      } else {
+        const list = el('div', { class: 'booking-list' });
+        for (const b of past.slice(0, 30)) {
+          list.appendChild(el('div', { class: 'booking-row' }, [
+            el('div', {}, [
+              el('div', { class: 'when' }, [
+                fmtDateLong(parseYmd(b.slot_date)), ' · ', fmtHourRange(b.slot_hour),
+              ]),
+              el('div', { class: 'meta' }, b.is_extension ? 'Extension' : 'Standard booking'),
+            ]),
+          ]));
+        }
+        if (past.length > 30) {
+          pastCard.appendChild(el('p', { class: 'dim' }, `Showing the most recent 30 of ${past.length}.`));
+        }
+        pastCard.appendChild(list);
+      }
+      root.appendChild(pastCard);
+    }
+
+    function slotStart(b) {
+      const d = parseYmd(b.slot_date);
+      d.setHours(b.slot_hour, 0, 0, 0);
+      return d;
+    }
+    function slotEnd(b) {
+      return new Date(slotStart(b).getTime() + 60 * 60 * 1000);
+    }
+    function formatRelative(d, now) {
+      const diffMs = d - now;
+      const abs = Math.abs(diffMs);
+      const mins = Math.round(abs / 60000);
+      const hours = Math.round(mins / 60);
+      const days = Math.round(hours / 24);
+      let s;
+      if (mins < 60) s = `${mins} min`;
+      else if (hours < 36) s = `${hours} hr`;
+      else s = `${days} day${days===1?'':'s'}`;
+      return diffMs > 0 ? `in ${s}` : `${s} ago`;
+    }
+    function progressBar(used, total) {
+      const pct = Math.min(100, (used / total) * 100);
+      const wrap = el('div', { style: {
+        background: 'var(--surface-2)', borderRadius: '999px', height: '8px',
+        overflow: 'hidden', marginTop: '4px',
+      }});
+      wrap.appendChild(el('div', { style: {
+        width: pct + '%', height: '100%',
+        background: 'var(--brand-500)', transition: 'width 0.2s',
+      }}));
+      return wrap;
+    }
+  </script>
+</body>
+</html>
