@@ -25,8 +25,19 @@ export class WeekScheduler {
   async init() {
     this.identity = await currentIdentity();
     this.availableGroups = this._deriveAvailableGroups(this.identity);
+    await this._loadGroupMemberCounts();
     await this.refresh();
     setInterval(() => { this.now = new Date(); this.render(); }, 60_000);
+  }
+
+  // Fills availableGroups[i].memberCount so the booking modal can warn
+  // when a group has < 4 members.
+  async _loadGroupMemberCounts() {
+    if (!this.availableGroups.length) return;
+    const ids = this.availableGroups.map(g => g.id);
+    const { data } = await sb().from('groups_directory').select('id, member_count').in('id', ids);
+    const byId = new Map((data || []).map(r => [r.id, r.member_count]));
+    for (const g of this.availableGroups) g.memberCount = byId.get(g.id) ?? 0;
   }
 
   _deriveAvailableGroups(id) {
@@ -263,22 +274,39 @@ export class WeekScheduler {
   }
 
   _openBookModal(dateStr, hour) {
-    // Pick the group to book for. If only one available, no chooser.
     let selectedGroupId = this.availableGroups[0].id;
+    const findGroup = (id) => this.availableGroups.find(g => g.id === id);
 
     const bodyChildren = [
       el('p', {}, fmtDateLong(parseYmd(dateStr))),
     ];
+
+    // Member-count warning slot (updated when the group selector changes).
+    const memberWarn = el('div', {});
+    const updateWarn = () => {
+      const g = findGroup(selectedGroupId);
+      const count = g ? (g.memberCount ?? 0) : 0;
+      memberWarn.innerHTML = '';
+      if (count < 4) {
+        memberWarn.appendChild(el('div', { class: 'banner banner-error' }, [
+          `${g ? g.name : 'This group'} has only ${count} member${count === 1 ? '' : 's'}. Groups need 4 to book.`,
+        ]));
+        bookBtn && (bookBtn.disabled = true);
+      } else {
+        bookBtn && (bookBtn.disabled = false);
+      }
+    };
 
     if (this.availableGroups.length > 1) {
       const select = document.createElement('select');
       for (const g of this.availableGroups) {
         const opt = document.createElement('option');
         opt.value = g.id;
-        opt.textContent = `${g.name} (${g.role})`;
+        const tag = (g.memberCount ?? 0) < 4 ? ` — ${g.memberCount ?? 0}/4 members` : '';
+        opt.textContent = `${g.name} (${g.role})${tag}`;
         select.appendChild(opt);
       }
-      select.addEventListener('change', () => { selectedGroupId = select.value; });
+      select.addEventListener('change', () => { selectedGroupId = select.value; updateWarn(); });
       bodyChildren.push(el('div', { class: 'field' }, [
         el('label', {}, 'Book for which group?'),
         select,
@@ -289,11 +317,13 @@ export class WeekScheduler {
       ]));
     }
 
+    bodyChildren.push(memberWarn);
     bodyChildren.push(el('p', { class: 'dim' }, [
       `Rules: same hour ≤ 2× this week. ≤ 16 total this week. `,
-      el('span', { id: '_same-hour-note' }, this._sameHourCountNote(hour, selectedGroupId)),
+      this._sameHourCountNote(hour, selectedGroupId),
     ]));
 
+    let bookBtn;
     this._openModal({
       title: `Book ${fmtHourRange(hour)}`,
       body: el('div', {}, bodyChildren),
@@ -311,6 +341,8 @@ export class WeekScheduler {
         }},
       ],
     });
+    bookBtn = this._modal.querySelector('.btn-primary');
+    updateWarn();
   }
 
   _sameHourCountNote(hour, groupId) {

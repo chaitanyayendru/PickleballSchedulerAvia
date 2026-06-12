@@ -1,5 +1,72 @@
 import { sb } from './supabase-client.js';
 
+// ============================================================
+// Create a group — called by a logged-in individual.
+// The captain (the current user) is automatically added as the
+// first member, linked to their auth account.
+// ============================================================
+export async function createGroup({ name, additionalMembers = [] }) {
+  if (!name || name.trim().length < 2) throw new Error('Group name must be at least 2 characters');
+
+  const client = sb();
+  const session = (await client.auth.getSession()).data.session;
+  if (!session) throw new Error('Log in first.');
+
+  // Fetch profile for the captain's name + email.
+  const { data: profile, error: pErr } = await client
+    .from('profiles')
+    .select('display_name, email')
+    .eq('id', session.user.id)
+    .maybeSingle();
+  if (pErr) throw new Error('Could not load your profile: ' + pErr.message);
+  if (!profile) throw new Error('Finish signing up first — no profile found.');
+
+  // Slug from name (lowercase, hyphenated). The groups table has a unique
+  // constraint on slug + on name, so duplicates will surface a clear error.
+  const slug = name.toLowerCase().trim()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  if (!slug) throw new Error('Group name contains no usable characters');
+
+  const { data: group, error: gErr } = await client
+    .from('groups')
+    .insert({
+      name: name.trim(),
+      slug,
+      leader_email: profile.email,
+      auth_user_id: session.user.id,
+    })
+    .select()
+    .single();
+  if (gErr) {
+    if (gErr.code === '23505') throw new Error('A group with that name already exists.');
+    throw new Error('Could not create group: ' + gErr.message);
+  }
+
+  // Insert captain as the first member.
+  const memberRows = [{
+    group_id: group.id,
+    name: profile.display_name,
+    ordinal: 1,
+    auth_user_id: session.user.id,
+  }];
+
+  // Any additional named members the captain adds at creation time get
+  // PIN-style seats (no auth_user_id) — they can join later via a join
+  // request which will fill in their auth link.
+  let ordinal = 2;
+  for (const n of additionalMembers) {
+    const trimmed = (n || '').trim();
+    if (!trimmed) continue;
+    if (ordinal > 6) break;
+    memberRows.push({ group_id: group.id, name: trimmed, ordinal: ordinal++ });
+  }
+
+  const { error: mErr } = await client.from('members').insert(memberRows);
+  if (mErr) throw new Error('Group created but members insert failed: ' + mErr.message);
+
+  return group;
+}
+
 export async function listGroupsDirectory() {
   const { data, error } = await sb()
     .from('groups_directory')

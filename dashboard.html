@@ -81,11 +81,20 @@
       });
 
       // Weekly summary
+      const tooFewMembers = memberRows.length < 4;
       root.appendChild(el('div', { class: 'card' }, [
         el('div', { class: 'card-header' }, [
           el('h2', {}, 'This week'),
-          el('a', { href: 'index.html', class: 'btn btn-primary btn-sm' }, 'Book a slot →'),
+          tooFewMembers
+            ? el('span', { class: 'tag' }, 'Booking locked: need 4+ members')
+            : el('a', { href: 'index.html', class: 'btn btn-primary btn-sm' }, 'Book a slot →'),
         ]),
+        tooFewMembers
+          ? el('div', { class: 'banner banner-info' }, [
+              `Your group has ${memberRows.length} member${memberRows.length === 1 ? '' : 's'}. You need at least 4 to book a slot. `,
+              'Share the Groups page with friends so they can request to join.',
+            ])
+          : null,
         el('p', { class: 'muted' }, `${thisWeek.length} of 16 bookings used`),
         progressBar(thisWeek.length, 16),
       ]));
@@ -278,7 +287,18 @@
       root.appendChild(el('div', { class: 'card' }, [
         el('h2', {}, 'Your account'),
         el('p', {}, [ el('strong', {}, p.display_name || '(no name)'), ' · ', p.email || id.session.user.email ]),
-        el('p', { class: 'dim' }, 'Individual account — you can join groups and book on their behalf.'),
+        el('p', { class: 'dim' }, 'You can create your own group, or request to join an existing one. Groups need 4 members before they can book.'),
+      ]));
+
+      // Quick actions
+      root.appendChild(el('div', { class: 'card' }, [
+        el('div', { class: 'card-header' }, [
+          el('h2', {}, 'Get started'),
+        ]),
+        el('div', { class: 'row' }, [
+          el('a', { href: 'create-group.html', class: 'btn btn-primary' }, 'Create a group'),
+          el('a', { href: 'groups.html',       class: 'btn btn-ghost'   }, 'Browse groups to join'),
+        ]),
       ]));
 
       // My groups
@@ -292,6 +312,8 @@
         groupsCard.appendChild(el('p', { class: 'dim' }, [
           'You haven\'t joined any group yet. ',
           el('a', { href: 'groups.html' }, 'Find one to join'),
+          ', or ',
+          el('a', { href: 'create-group.html' }, 'create your own'),
           '.',
         ]));
       } else {
